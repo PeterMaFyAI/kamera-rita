@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Kamera + Rita</title>
+  <style>
+    :root { --bg:#0b1020; --fg:#eef2ff; --accent:#7c9cff; }
+    body { margin:0; font-family:system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+           background:linear-gradient(180deg, #0b1020 0%, #121a35 100%); color:var(--fg); }
+    .wrap { max-width: min(900px, 95vw); margin: 24px auto; }
+    .toolbar {
+      display:flex; gap:12px; align-items:center; flex-wrap:wrap;
+      background:#141c3a; border:1px solid #223060; padding:10px 12px; border-radius:14px;
+      box-shadow: 0 6px 20px rgba(0,0,0,.2);
+    }
+    button, input[type="color"], input[type="range"]{
+      background:#1a2450; color:var(--fg); border:1px solid #2b3a75; padding:10px 14px;
+      border-radius:12px; cursor:pointer; font-weight:600;
+    }
+    button:hover { filter:brightness(1.1); }
+    .range { display:flex; align-items:center; gap:10px }
+    .stage {
+      position:relative; margin-top:14px; border-radius:18px; overflow:hidden;
+      border:1px solid #223060; background:#000;
+      box-shadow: 0 20px 40px rgba(0,0,0,.35);
+      touch-action:none;   /* så att touch inte scrollar när man ritar */
+    }
+    video, canvas { display:block; width:100%; height:auto; }
+    video { filter: saturate(1.05) contrast(1.02); }
+    canvas.drawing {
+      position:absolute; inset:0; /* täcker videon exakt */
+    }
+    .hint { opacity:.8; font-size:.9rem; margin-top:8px }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="toolbar">
+      <button id="startBtn">Starta kamera</button>
+      <button id="clearBtn" title="Rensa ritningen">Rensa</button>
+      <label class="range">Färg:
+        <input id="color" type="color" value="#ffda36" />
+      </label>
+      <label class="range">Tjocklek:
+        <input id="size" type="range" min="1" max="30" value="6" />
+      </label>
+      <span id="status" style="margin-left:auto; opacity:.8">Redo</span>
+    </div>
+
+    <div class="stage" id="stage">
+      <video id="video" playsinline autoplay muted></video>
+      <canvas class="drawing" id="canvas"></canvas>
+    </div>
+
+    <div class="hint">
+      Tips: Kör på <b>HTTPS</b> (t.ex. GitHub Pages) eller från <code>localhost</code>—annars blockeras kamera. Om du får
+      <i>NotAllowedError: Permission denied</i>, kontrollera att webbläsaren har kameratillstånd för sidan.
+    </div>
+  </div>
+
+  <script>
+    const video  = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const ctx    = canvas.getContext('2d', { alpha:true });
+    const startBtn = document.getElementById('startBtn');
+    const clearBtn = document.getElementById('clearBtn');
+    const colorInp = document.getElementById('color');
+    const sizeInp  = document.getElementById('size');
+    const statusEl = document.getElementById('status');
+    const stage    = document.getElementById('stage');
+
+    let drawing = false;
+    let lastX = 0, lastY = 0;
+
+    // Skala canvas exakt till videons rendering
+    function fitCanvasToVideo() {
+      const rect = video.getBoundingClientRect();
+      // Sätt logisk storlek = CSS-storlek * devicePixelRatio för skarp linje
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width  = Math.floor(rect.width  * dpr);
+      canvas.height = Math.floor(rect.height * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0); // så vi kan rita i CSS-px-koordinater
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+    }
+
+    // Starta kameran på knapptryck (krävs ofta av webbläsare)
+    startBtn.addEventListener('click', async () => {
+      try {
+        statusEl.textContent = 'Begär kameratillstånd...';
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'user' }, audio: false
+        });
+        video.srcObject = stream;
+
+        await video.play(); // säkra att metadata laddas
+        // När videon layoutas, anpassa canvas
+        requestAnimationFrame(() => {
+          fitCanvasToVideo();
+          statusEl.textContent = 'Kamera igång';
+          startBtn.disabled = true;
+        });
+      } catch (err) {
+        console.error(err);
+        statusEl.textContent = 'Fel: ' + (err && err.name ? err.name : 'okänt');
+        alert('Kunde inte starta kameran.\n' + err);
+      }
+    });
+
+    // Anpassa vid fönsterstorleksändring / orientation change
+    const ro = new ResizeObserver(() => fitCanvasToVideo());
+    ro.observe(stage);
+
+    clearBtn.addEventListener('click', () => {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    });
+
+    // Helper: få punkt i canvas-koordinater
+    function getPoint(evt) {
+      const rect = canvas.getBoundingClientRect();
+      const x = (evt.clientX - rect.left);
+      const y = (evt.clientY - rect.top);
+      return { x, y };
+    }
+
+    // Rita-läge med Pointer Events (mus + touch + penna)
+    canvas.addEventListener('pointerdown', (evt) => {
+      canvas.setPointerCapture(evt.pointerId);
+      drawing = true;
+      const p = getPoint(evt);
+      lastX = p.x; lastY = p.y;
+    });
+
+    canvas.addEventListener('pointermove', (evt) => {
+      if (!drawing) return;
+      const p = getPoint(evt);
+      ctx.strokeStyle = colorInp.value;
+      ctx.lineWidth   = parseFloat(sizeInp.value);
+      ctx.beginPath();
+      ctx.moveTo(lastX, lastY);
+      ctx.lineTo(p.x, p.y);
+      ctx.stroke();
+      lastX = p.x; lastY = p.y;
+    });
+
+    function endStroke(evt){
+      if (!drawing) return;
+      drawing = false;
+      try { canvas.releasePointerCapture(evt.pointerId); } catch {}
+    }
+    canvas.addEventListener('pointerup', endStroke);
+    canvas.addEventListener('pointercancel', endStroke);
+    canvas.addEventListener('pointerleave', endStroke);
+
+    // Blockera dubbel-tap-zoom på iOS när man ritar
+    document.addEventListener('gesturestart', e => e.preventDefault());
+  </script>
+</body>
+</html>
