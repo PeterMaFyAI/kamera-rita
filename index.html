@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Kamera + Air-draw (pinch med markörer)</title>
+  <title>Kamera + Air-draw (lager + suddgummi)</title>
   <style>
     :root { --bg:#0b1020; --fg:#eef2ff; }
     body {
@@ -33,7 +33,8 @@
     }
     video, canvas { display:block; width:100%; height:auto; }
     video { transform: scaleX(-1); transform-origin:center; filter:saturate(1.05) contrast(1.02); }
-    canvas.drawing { position:absolute; inset:0; }
+    canvas.draw { position:absolute; inset:0; }     /* permanent ritning */
+    canvas.ui   { position:absolute; inset:0; }     /* markörer (rensas varje frame) */
     .hint { opacity:.85; font-size:.9rem; margin-top:8px }
     .mini { font-size:.85rem; opacity:.85 }
   </style>
@@ -43,20 +44,23 @@
   <div class="toolbar">
     <button id="startBtn">Starta kamera</button>
     <button id="airBtn" class="toggle">Air-draw: På</button>
-    <button id="clearBtn">Rensa</button>
+    <button id="eraserBtn">Suddgummi: Av</button>
+    <button id="clearBtn">Rensa ritning</button>
     <label>Färg <input id="color" type="color" value="#ffda36"></label>
-    <label>Tjocklek <input id="size" type="range" min="1" max="30" value="6"></label>
+    <label>Tjocklek <input id="size" type="range" min="1" max="40" value="8"></label>
     <span id="status" style="margin-left:auto" class="mini">Redo</span>
   </div>
 
   <div class="stage" id="stage">
     <video id="video" playsinline autoplay muted></video>
-    <canvas class="drawing" id="canvas"></canvas>
+    <canvas class="draw" id="canvasDraw"></canvas> <!-- permanent -->
+    <canvas class="ui"   id="canvasUI"></canvas>   <!-- markörer -->
   </div>
 
   <div class="hint">
-    • <b>Pincha</b> (tumme + pekfinger ihop) = skrivläge (grön prick).<br>
-    • Isär = pausläge (blå prickar visar fingrarna).
+    • Pincha (tumme + pekfinger ihop) = rita. Släpp = pausa. <br>
+    • Blå prickar = tummen & pekfingret. Grön prick = pinch (skrivläge). <br>
+    • Suddgummi raderar ritningen (inte markörerna). Kör via <b>HTTPS</b>.
   </div>
 </div>
 
@@ -66,37 +70,85 @@
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.min.js"></script>
 
 <script>
-  const video   = document.getElementById('video');
-  const canvas  = document.getElementById('canvas');
-  const ctx     = canvas.getContext('2d', { alpha:true });
-  const stage   = document.getElementById('stage');
-  const startBtn= document.getElementById('startBtn');
-  const airBtn  = document.getElementById('airBtn');
-  const clearBtn= document.getElementById('clearBtn');
-  const colorInp= document.getElementById('color');
-  const sizeInp = document.getElementById('size');
-  const statusEl= document.getElementById('status');
+  const video      = document.getElementById('video');
+  const stage      = document.getElementById('stage');
+  const canvasDraw = document.getElementById('canvasDraw');
+  const canvasUI   = document.getElementById('canvasUI');
+  const ctxDraw    = canvasDraw.getContext('2d', { alpha:true });
+  const ctxUI      = canvasUI.getContext('2d',   { alpha:true });
 
-  const MIRROR = true; // vi speglar både video och koordinater
-  let airDrawOn = true;
-  let lastAir   = null;
+  const startBtn   = document.getElementById('startBtn');
+  const airBtn     = document.getElementById('airBtn');
+  const eraserBtn  = document.getElementById('eraserBtn');
+  const clearBtn   = document.getElementById('clearBtn');
+  const colorInp   = document.getElementById('color');
+  const sizeInp    = document.getElementById('size');
+  const statusEl   = document.getElementById('status');
 
-  function fitCanvasToVideo() {
-    const rect = video.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
-    canvas.width  = Math.floor(rect.width  * dpr);
-    canvas.height = Math.floor(rect.height * dpr);
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const MIRROR = true;      // videon är speglad, så vi speglar X-koordinaterna
+  let airDrawOn = true;     // på som standard
+  let eraserOn  = false;
+  let lastAir   = null;     // senaste ritposition (pekfingerspets) i canvas-koordinater
+
+  function setStrokeStyle(ctx){
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
+    ctx.lineWidth = +sizeInp.value;
+    if (eraserOn) {
+      ctx.globalCompositeOperation = 'destination-out'; // radera
+      // färg spelar ingen roll i eraser-läge
+    } else {
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.strokeStyle = colorInp.value;
+    }
   }
-  const ro = new ResizeObserver(fitCanvasToVideo);
+
+  function resizeCanvasKeepContent(canvas, ctx, newW, newH, dpr=1){
+    // behåll innehåll vid storleksändring
+    const tmp = document.createElement('canvas');
+    tmp.width = canvas.width;
+    tmp.height = canvas.height;
+    tmp.getContext('2d').drawImage(canvas, 0, 0);
+
+    canvas.width  = Math.floor(newW * dpr);
+    canvas.height = Math.floor(newH * dpr);
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+
+    // skala in gamla bilden till nya dimensioner
+    ctx.drawImage(tmp, 0,0, tmp.width, tmp.height, 0,0, canvas.width, canvas.height);
+  }
+
+  function fitCanvasesToVideo(){
+    const rect = video.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    // behåll ritning
+    resizeCanvasKeepContent(canvasDraw, ctxDraw, rect.width, rect.height, dpr);
+    // UI-canvas behöver inte behålla (rensar varje frame ändå)
+    canvasUI.width  = Math.floor(rect.width  * dpr);
+    canvasUI.height = Math.floor(rect.height * dpr);
+    ctxUI.setTransform(dpr,0,0,dpr,0,0);
+  }
+  const ro = new ResizeObserver(fitCanvasesToVideo);
   ro.observe(stage);
 
-  clearBtn.onclick = ()=> ctx.clearRect(0,0,canvas.width,canvas.height);
+  clearBtn.onclick = ()=> {
+    ctxDraw.clearRect(0,0,canvasDraw.width,canvasDraw.height);
+  };
+  eraserBtn.onclick = ()=>{
+    eraserOn = !eraserOn;
+    eraserBtn.textContent = 'Suddgummi: ' + (eraserOn ? 'På' : 'Av');
+    eraserBtn.classList.toggle('on', eraserOn);
+  };
+  airBtn.onclick = ()=>{
+    airDrawOn = !airDrawOn;
+    airBtn.textContent = 'Air-draw: ' + (airDrawOn ? 'På' : 'Av');
+    airBtn.classList.toggle('on', airDrawOn);
+    if(!airDrawOn) lastAir = null;
+  };
+  airBtn.classList.add('on');
 
   function normToCanvas(x, y){
-    const r = canvas.getBoundingClientRect();
+    const r = canvasDraw.getBoundingClientRect();
     const xN = MIRROR ? (1 - x) : x;
     return { x: xN * r.width, y: y * r.height };
   }
@@ -105,10 +157,10 @@
     const i = landmarks[8], t = landmarks[4];
     if(!i || !t) return false;
     const dx = i.x - t.x, dy = i.y - t.y;
-    return Math.hypot(dx, dy) < 0.05; // tröskel
+    return Math.hypot(dx, dy) < 0.05; // tröskel (justera vid behov)
   }
 
-  function drawMarker(p, color, radius=8){
+  function drawMarker(ctx, p, color, radius=8){
     ctx.beginPath();
     ctx.arc(p.x, p.y, radius, 0, Math.PI*2);
     ctx.fillStyle = color;
@@ -126,35 +178,35 @@
   });
 
   hands.onResults((res)=>{
+    // rensa bara UI-lagret varje frame (ritningen lämnas orörd)
+    ctxUI.clearRect(0,0,canvasUI.width,canvasUI.height);
+
     if(!res.multiHandLandmarks || res.multiHandLandmarks.length===0){
       lastAir = null; return;
     }
     const lm = res.multiHandLandmarks[0];
-    const tipIndex = normToCanvas(lm[8].x, lm[8].y);
-    const tipThumb = normToCanvas(lm[4].x, lm[4].y);
+    const pIndex = normToCanvas(lm[8].x, lm[8].y);
+    const pThumb = normToCanvas(lm[4].x, lm[4].y);
+    const pinch  = isPinching(lm);
 
-    const pinch = isPinching(lm);
-
-    // Rita markörer
+    // Markörer
     if(pinch){
-      // mittpunkt grön
-      const mid = { x: (tipIndex.x + tipThumb.x)/2, y: (tipIndex.y + tipThumb.y)/2 };
-      drawMarker(mid, "#22c55e"); // grön
+      const mid = { x: (pIndex.x + pThumb.x)/2, y: (pIndex.y + pThumb.y)/2 };
+      drawMarker(ctxUI, mid, "#22c55e", 9); // grön vid skrivläge
     } else {
-      drawMarker(tipIndex, "#3b82f6"); // blå
-      drawMarker(tipThumb, "#3b82f6");
+      drawMarker(ctxUI, pIndex, "#3b82f6", 7); // blå pekfinger
+      drawMarker(ctxUI, pThumb, "#3b82f6", 7); // blå tumme
     }
 
-    // Rita om airDrawOn + pinch
+    // Rita endast när airDrawOn + pinch
     if(airDrawOn && pinch){
-      ctx.strokeStyle = colorInp.value;
-      ctx.lineWidth = +sizeInp.value;
-      if(!lastAir){ lastAir = tipIndex; return; }
-      ctx.beginPath();
-      ctx.moveTo(lastAir.x, lastAir.y);
-      ctx.lineTo(tipIndex.x, tipIndex.y);
-      ctx.stroke();
-      lastAir = tipIndex;
+      setStrokeStyle(ctxDraw);
+      if(!lastAir){ lastAir = pIndex; return; }
+      ctxDraw.beginPath();
+      ctxDraw.moveTo(lastAir.x, lastAir.y);
+      ctxDraw.lineTo(pIndex.x, pIndex.y);
+      ctxDraw.stroke();
+      lastAir = pIndex;
     } else {
       lastAir = null;
     }
@@ -164,15 +216,12 @@
     try {
       statusEl.textContent = 'Startar kamera...';
       const cam = new Camera(video, {
-        onFrame: async () => { 
-          ctx.clearRect(0,0,canvas.width,canvas.height); // rensa varje frame så markörer inte lämnar spår
-          await hands.send({image: video});
-        },
+        onFrame: async () => { await hands.send({image: video}); },
         width: 640, height: 480
       });
       await cam.start();
       requestAnimationFrame(()=>{
-        fitCanvasToVideo();
+        fitCanvasesToVideo();
         statusEl.textContent = 'Kamera igång';
         startBtn.disabled = true;
       });
@@ -182,14 +231,6 @@
       alert('Kunde inte starta kameran.\n' + err);
     }
   };
-
-  airBtn.onclick = ()=>{
-    airDrawOn = !airDrawOn;
-    airBtn.textContent = 'Air-draw: ' + (airDrawOn ? 'På' : 'Av');
-    airBtn.classList.toggle('on', airDrawOn);
-    if(!airDrawOn) lastAir = null;
-  };
-  airBtn.classList.add('on');
 </script>
 </body>
 </html>
