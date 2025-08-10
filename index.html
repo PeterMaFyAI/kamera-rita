@@ -3,158 +3,200 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Kamera + Rita</title>
+  <title>Kamera + Rita (touch/mus + air-draw)</title>
   <style>
     :root { --bg:#0b1020; --fg:#eef2ff; --accent:#7c9cff; }
     body { margin:0; font-family:system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
            background:linear-gradient(180deg, #0b1020 0%, #121a35 100%); color:var(--fg); }
-    .wrap { max-width: min(900px, 95vw); margin: 24px auto; }
+    .wrap { max-width:min(980px,95vw); margin:24px auto; }
     .toolbar {
-      display:flex; gap:12px; align-items:center; flex-wrap:wrap;
+      display:flex; gap:10px; align-items:center; flex-wrap:wrap;
       background:#141c3a; border:1px solid #223060; padding:10px 12px; border-radius:14px;
-      box-shadow: 0 6px 20px rgba(0,0,0,.2);
+      box-shadow:0 6px 20px rgba(0,0,0,.2);
     }
     button, input[type="color"], input[type="range"]{
       background:#1a2450; color:var(--fg); border:1px solid #2b3a75; padding:10px 14px;
       border-radius:12px; cursor:pointer; font-weight:600;
     }
-    button:hover { filter:brightness(1.1); }
-    .range { display:flex; align-items:center; gap:10px }
+    .toggle.on { outline:2px solid #4ade80; }
     .stage {
       position:relative; margin-top:14px; border-radius:18px; overflow:hidden;
-      border:1px solid #223060; background:#000;
-      box-shadow: 0 20px 40px rgba(0,0,0,.35);
-      touch-action:none;   /* så att touch inte scrollar när man ritar */
+      border:1px solid #223060; background:#000; box-shadow:0 20px 40px rgba(0,0,0,.35);
+      touch-action:none;
     }
     video, canvas { display:block; width:100%; height:auto; }
-    video { filter: saturate(1.05) contrast(1.02); }
-    canvas.drawing {
-      position:absolute; inset:0; /* täcker videon exakt */
-    }
-    .hint { opacity:.8; font-size:.9rem; margin-top:8px }
+    canvas.drawing { position:absolute; inset:0; }
+    .hint { opacity:.85; font-size:.9rem; margin-top:8px }
+    .mini { font-size:.85rem; opacity:.85 }
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <div class="toolbar">
-      <button id="startBtn">Starta kamera</button>
-      <button id="clearBtn" title="Rensa ritningen">Rensa</button>
-      <label class="range">Färg:
-        <input id="color" type="color" value="#ffda36" />
-      </label>
-      <label class="range">Tjocklek:
-        <input id="size" type="range" min="1" max="30" value="6" />
-      </label>
-      <span id="status" style="margin-left:auto; opacity:.8">Redo</span>
-    </div>
-
-    <div class="stage" id="stage">
-      <video id="video" playsinline autoplay muted></video>
-      <canvas class="drawing" id="canvas"></canvas>
-    </div>
-
-    <div class="hint">
-      Tips: Kör på <b>HTTPS</b> (t.ex. GitHub Pages) eller från <code>localhost</code>—annars blockeras kamera. Om du får
-      <i>NotAllowedError: Permission denied</i>, kontrollera att webbläsaren har kameratillstånd för sidan.
-    </div>
+<div class="wrap">
+  <div class="toolbar">
+    <button id="startBtn">Starta kamera</button>
+    <button id="airBtn" class="toggle" title="Rita i luften med pekfingret">Air-draw: Av</button>
+    <button id="clearBtn">Rensa</button>
+    <label>Färg <input id="color" type="color" value="#ffda36"></label>
+    <label>Tjocklek <input id="size" type="range" min="1" max="30" value="6"></label>
+    <span id="status" style="margin-left:auto" class="mini">Redo</span>
   </div>
 
-  <script>
-    const video  = document.getElementById('video');
-    const canvas = document.getElementById('canvas');
-    const ctx    = canvas.getContext('2d', { alpha:true });
-    const startBtn = document.getElementById('startBtn');
-    const clearBtn = document.getElementById('clearBtn');
-    const colorInp = document.getElementById('color');
-    const sizeInp  = document.getElementById('size');
-    const statusEl = document.getElementById('status');
-    const stage    = document.getElementById('stage');
+  <div class="stage" id="stage">
+    <video id="video" playsinline autoplay muted></video>
+    <canvas class="drawing" id="canvas"></canvas>
+  </div>
 
-    let drawing = false;
-    let lastX = 0, lastY = 0;
+  <div class="hint">
+    • Touch/mus: rita direkt på videon. • Air-draw: tryck “Starta kamera”, slå på “Air-draw” och peka mot kameran.<br>
+    Tips: ha handen tydligt i bild med god belysning.
+  </div>
+</div>
 
-    // Skala canvas exakt till videons rendering
-    function fitCanvasToVideo() {
-      const rect = video.getBoundingClientRect();
-      // Sätt logisk storlek = CSS-storlek * devicePixelRatio för skarp linje
-      const dpr = window.devicePixelRatio || 1;
-      canvas.width  = Math.floor(rect.width  * dpr);
-      canvas.height = Math.floor(rect.height * dpr);
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0); // så vi kan rita i CSS-px-koordinater
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
+<!-- MediaPipe (äldre stabila JS-API:t) -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.min.js"></script>
+
+<script>
+  const video   = document.getElementById('video');
+  const canvas  = document.getElementById('canvas');
+  const ctx     = canvas.getContext('2d', { alpha:true });
+  const stage   = document.getElementById('stage');
+  const startBtn= document.getElementById('startBtn');
+  const airBtn  = document.getElementById('airBtn');
+  const clearBtn= document.getElementById('clearBtn');
+  const colorInp= document.getElementById('color');
+  const sizeInp = document.getElementById('size');
+  const statusEl= document.getElementById('status');
+
+  let drawingTouch = false;
+  let lastX=0, lastY=0;
+  let airDrawOn = false;
+
+  function fitCanvasToVideo() {
+    const rect = video.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width  = Math.floor(rect.width  * dpr);
+    canvas.height = Math.floor(rect.height * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+  }
+  const ro = new ResizeObserver(fitCanvasToVideo);
+  ro.observe(stage);
+
+  clearBtn.onclick = ()=> ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  // Touch/mus-ritning
+  function getPoint(evt){
+    const r = canvas.getBoundingClientRect();
+    return { x: evt.clientX - r.left, y: evt.clientY - r.top };
+  }
+  canvas.addEventListener('pointerdown', e=>{
+    canvas.setPointerCapture(e.pointerId);
+    drawingTouch = true;
+    const p = getPoint(e); lastX=p.x; lastY=p.y;
+  });
+  canvas.addEventListener('pointermove', e=>{
+    if(!drawingTouch) return;
+    const p = getPoint(e);
+    ctx.strokeStyle = colorInp.value;
+    ctx.lineWidth = +sizeInp.value;
+    ctx.beginPath(); ctx.moveTo(lastX,lastY); ctx.lineTo(p.x,p.y); ctx.stroke();
+    lastX=p.x; lastY=p.y;
+  });
+  ['pointerup','pointerleave','pointercancel'].forEach(t=>{
+    canvas.addEventListener(t, e=>{ drawingTouch=false; try{canvas.releasePointerCapture(e.pointerId)}catch{} });
+  });
+
+  // Kamera + MediaPipe Hands
+  let cam = null;
+  const hands = new Hands({
+    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+  });
+  hands.setOptions({
+    maxNumHands: 1,
+    modelComplexity: 1,
+    minDetectionConfidence: 0.6,
+    minTrackingConfidence: 0.6
+  });
+
+  // Skala normaliserade handkoordinater (0..1) till canvas
+  function normToCanvas(x, y){
+    // MediaPipe använder videons råa orientering; vår <video> är fit:contain i stage.
+    // Vi mappar mot canvasens aktuella CSS-storlek.
+    const r = canvas.getBoundingClientRect();
+    return { x: x * r.width, y: y * r.height };
+  }
+
+  // Enkelt "ritvillkor": rita när pekfinger är uppe och inte "pinchar"
+  function shouldDraw(landmarks){
+    // 8 = index fingertip, 4 = thumb tip
+    const i = landmarks[8], t = landmarks[4];
+    if(!i || !t) return false;
+    // avstånd i normaliserade coords
+    const dx = i.x - t.x, dy = i.y - t.y;
+    const dist = Math.hypot(dx, dy);
+    // rita när INTE pinch (dvs dist större än tröskel)
+    return dist > 0.08; // justerbar tröskel
+  }
+
+  let lastAir = null;
+  hands.onResults((res)=>{
+    if(!airDrawOn) { lastAir = null; return; }
+    if(!res.multiHandLandmarks || res.multiHandLandmarks.length===0){
+      lastAir = null; return;
     }
+    const lm = res.multiHandLandmarks[0];
+    const tip = lm[8]; // pekfingerspets
+    if(!tip){ lastAir=null; return; }
 
-    // Starta kameran på knapptryck (krävs ofta av webbläsare)
-    startBtn.addEventListener('click', async () => {
-      try {
-        statusEl.textContent = 'Begär kameratillstånd...';
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'user' }, audio: false
-        });
-        video.srcObject = stream;
+    const p = normToCanvas(tip.x, tip.y);
+    ctx.strokeStyle = colorInp.value;
+    ctx.lineWidth = +sizeInp.value;
 
-        await video.play(); // säkra att metadata laddas
-        // När videon layoutas, anpassa canvas
-        requestAnimationFrame(() => {
-          fitCanvasToVideo();
-          statusEl.textContent = 'Kamera igång';
-          startBtn.disabled = true;
-        });
-      } catch (err) {
-        console.error(err);
-        statusEl.textContent = 'Fel: ' + (err && err.name ? err.name : 'okänt');
-        alert('Kunde inte starta kameran.\n' + err);
-      }
-    });
-
-    // Anpassa vid fönsterstorleksändring / orientation change
-    const ro = new ResizeObserver(() => fitCanvasToVideo());
-    ro.observe(stage);
-
-    clearBtn.addEventListener('click', () => {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-    });
-
-    // Helper: få punkt i canvas-koordinater
-    function getPoint(evt) {
-      const rect = canvas.getBoundingClientRect();
-      const x = (evt.clientX - rect.left);
-      const y = (evt.clientY - rect.top);
-      return { x, y };
-    }
-
-    // Rita-läge med Pointer Events (mus + touch + penna)
-    canvas.addEventListener('pointerdown', (evt) => {
-      canvas.setPointerCapture(evt.pointerId);
-      drawing = true;
-      const p = getPoint(evt);
-      lastX = p.x; lastY = p.y;
-    });
-
-    canvas.addEventListener('pointermove', (evt) => {
-      if (!drawing) return;
-      const p = getPoint(evt);
-      ctx.strokeStyle = colorInp.value;
-      ctx.lineWidth   = parseFloat(sizeInp.value);
+    if(shouldDraw(lm)){
+      if(!lastAir){ lastAir = p; }
       ctx.beginPath();
-      ctx.moveTo(lastX, lastY);
+      ctx.moveTo(lastAir.x, lastAir.y);
       ctx.lineTo(p.x, p.y);
       ctx.stroke();
-      lastX = p.x; lastY = p.y;
-    });
-
-    function endStroke(evt){
-      if (!drawing) return;
-      drawing = false;
-      try { canvas.releasePointerCapture(evt.pointerId); } catch {}
+      lastAir = p;
+    } else {
+      lastAir = null; // uppehåll / “penna lyfts”
     }
-    canvas.addEventListener('pointerup', endStroke);
-    canvas.addEventListener('pointercancel', endStroke);
-    canvas.addEventListener('pointerleave', endStroke);
+  });
 
-    // Blockera dubbel-tap-zoom på iOS när man ritar
-    document.addEventListener('gesturestart', e => e.preventDefault());
-  </script>
+  startBtn.onclick = async ()=>{
+    try {
+      statusEl.textContent = 'Startar kamera...';
+      // MediaPipe Camera lösning sköter frames -> hands
+      cam = new Camera(video, {
+        onFrame: async () => {
+          await hands.send({image: video});
+        },
+        width: 640, height: 480
+      });
+      await cam.start();
+      // vänta en frame så video har layout
+      requestAnimationFrame(()=>{
+        fitCanvasToVideo();
+        statusEl.textContent = 'Kamera igång';
+        startBtn.disabled = true;
+      });
+    } catch(err){
+      console.error(err);
+      statusEl.textContent = 'Fel: ' + (err && err.name ? err.name : 'okänt');
+      alert('Kunde inte starta kameran.\n' + err);
+    }
+  };
+
+  airBtn.onclick = ()=>{
+    airDrawOn = !airDrawOn;
+    airBtn.textContent = 'Air-draw: ' + (airDrawOn ? 'På' : 'Av');
+    airBtn.classList.toggle('on', airDrawOn);
+    if(!airDrawOn) lastAir = null;
+  };
+</script>
 </body>
 </html>
