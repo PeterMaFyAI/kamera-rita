@@ -3,29 +3,35 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Kamera + Air-draw (pinch för att rita)</title>
+  <title>Kamera + Air-draw (pinch med markörer)</title>
   <style>
-    :root { --bg:#0b1020; --fg:#eef2ff; --accent:#7c9cff; }
-    body { margin:0; font-family:system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
-           background:linear-gradient(180deg, #0b1020 0%, #121a35 100%); color:var(--fg); }
+    :root { --bg:#0b1020; --fg:#eef2ff; }
+    body {
+      margin:0;
+      font-family:system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+      background:linear-gradient(180deg, #0b1020 0%, #121a35 100%);
+      color:var(--fg);
+    }
     .wrap { max-width:min(980px,95vw); margin:24px auto; }
     .toolbar {
       display:flex; gap:10px; align-items:center; flex-wrap:wrap;
-      background:#141c3a; border:1px solid #223060; padding:10px 12px; border-radius:14px;
+      background:#141c3a; border:1px solid #223060;
+      padding:10px 12px; border-radius:14px;
       box-shadow:0 6px 20px rgba(0,0,0,.2);
     }
     button, input[type="color"], input[type="range"]{
-      background:#1a2450; color:var(--fg); border:1px solid #2b3a75; padding:10px 14px;
-      border-radius:12px; cursor:pointer; font-weight:600;
+      background:#1a2450; color:var(--fg); border:1px solid #2b3a75;
+      padding:10px 14px; border-radius:12px;
+      cursor:pointer; font-weight:600;
     }
     .toggle.on { outline:2px solid #4ade80; }
     .stage {
       position:relative; margin-top:14px; border-radius:18px; overflow:hidden;
-      border:1px solid #223060; background:#000; box-shadow:0 20px 40px rgba(0,0,0,.35);
+      border:1px solid #223060; background:#000;
+      box-shadow:0 20px 40px rgba(0,0,0,.35);
       touch-action:none;
     }
     video, canvas { display:block; width:100%; height:auto; }
-    /* SPEGLA bara videon – inte canvas-elementet */
     video { transform: scaleX(-1); transform-origin:center; filter:saturate(1.05) contrast(1.02); }
     canvas.drawing { position:absolute; inset:0; }
     .hint { opacity:.85; font-size:.9rem; margin-top:8px }
@@ -49,12 +55,12 @@
   </div>
 
   <div class="hint">
-    • <b>Pincha</b> (tumme + pekfinger ihop) för att rita i luften. Släpp pinchen för att pausa.<br>
-    • Belysning hjälper. Kör via <b>HTTPS</b> (GitHub Pages).
+    • <b>Pincha</b> (tumme + pekfinger ihop) = skrivläge (grön prick).<br>
+    • Isär = pausläge (blå prickar visar fingrarna).
   </div>
 </div>
 
-<!-- MediaPipe Hands (stabila CDN) -->
+<!-- MediaPipe Hands -->
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.min.js"></script>
@@ -71,12 +77,9 @@
   const sizeInp = document.getElementById('size');
   const statusEl= document.getElementById('status');
 
-  // Vi speglar videon visuellt, så vi behöver spegla X-koordinater i all ritlogik.
-  const MIRROR = true;
-
-  let airDrawOn = true;        // som önskat: Air-draw på som standard
-  let lastAir   = null;        // föregående fingertopp-punkt (canvas-coords)
-  let drawingTouch = false;    // för mus/touch om du vill prova
+  const MIRROR = true; // vi speglar både video och koordinater
+  let airDrawOn = true;
+  let lastAir   = null;
 
   function fitCanvasToVideo() {
     const rect = video.getBoundingClientRect();
@@ -92,33 +95,26 @@
 
   clearBtn.onclick = ()=> ctx.clearRect(0,0,canvas.width,canvas.height);
 
-  // Pek-ritning (frivilligt – fungerar också med speglingen)
-  function getPoint(evt){
+  function normToCanvas(x, y){
     const r = canvas.getBoundingClientRect();
-    const rawX = evt.clientX - r.left;
-    const y = evt.clientY - r.top;
-    const x = MIRROR ? (r.width - rawX) : rawX;  // spegla koordinat så linjen hamnar där fingret syns
-    return { x, y };
+    const xN = MIRROR ? (1 - x) : x;
+    return { x: xN * r.width, y: y * r.height };
   }
-  canvas.addEventListener('pointerdown', e=>{
-    canvas.setPointerCapture(e.pointerId);
-    drawingTouch = true;
-    const p = getPoint(e); lastX=p.x; lastY=p.y;
-  });
-  canvas.addEventListener('pointermove', e=>{
-    if(!drawingTouch) return;
-    const p = getPoint(e);
-    ctx.strokeStyle = colorInp.value;
-    ctx.lineWidth = +sizeInp.value;
-    ctx.beginPath(); ctx.moveTo(lastX,lastY); ctx.lineTo(p.x,p.y); ctx.stroke();
-    lastX=p.x; lastY=p.y;
-  });
-  ['pointerup','pointerleave','pointercancel'].forEach(t=>{
-    canvas.addEventListener(t, e=>{ drawingTouch=false; try{canvas.releasePointerCapture(e.pointerId)}catch{} });
-  });
 
-  // MediaPipe Hands
-  let cam = null;
+  function isPinching(landmarks){
+    const i = landmarks[8], t = landmarks[4];
+    if(!i || !t) return false;
+    const dx = i.x - t.x, dy = i.y - t.y;
+    return Math.hypot(dx, dy) < 0.05; // tröskel
+  }
+
+  function drawMarker(p, color, radius=8){
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, radius, 0, Math.PI*2);
+    ctx.fillStyle = color;
+    ctx.fill();
+  }
+
   const hands = new Hands({
     locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
   });
@@ -129,52 +125,49 @@
     minTrackingConfidence: 0.6
   });
 
-  // Skala normaliserade coords (0..1) -> canvas, med spegling
-  function normToCanvas(x, y){
-    const r = canvas.getBoundingClientRect();
-    const xN = MIRROR ? (1 - x) : x;     // spegla x
-    return { x: xN * r.width, y: y * r.height };
-  }
-
-  // PINCH-logik: rita ENDAST när tumme och pekfingerspets är nära
-  function isPinching(landmarks){
-    const i = landmarks[8], t = landmarks[4];
-    if(!i || !t) return false;
-    const dx = i.x - t.x, dy = i.y - t.y;
-    const dist = Math.hypot(dx, dy); // normaliserad distans
-    return dist < 0.05; // tröskel (finjustera vid behov)
-  }
-
   hands.onResults((res)=>{
-    if(!airDrawOn) { lastAir = null; return; }
     if(!res.multiHandLandmarks || res.multiHandLandmarks.length===0){
       lastAir = null; return;
     }
     const lm = res.multiHandLandmarks[0];
-    const tip = lm[8]; // pekfingerspets
-    if(!tip){ lastAir=null; return; }
+    const tipIndex = normToCanvas(lm[8].x, lm[8].y);
+    const tipThumb = normToCanvas(lm[4].x, lm[4].y);
 
-    const p = normToCanvas(tip.x, tip.y);
-    ctx.strokeStyle = colorInp.value;
-    ctx.lineWidth = +sizeInp.value;
+    const pinch = isPinching(lm);
 
-    if(isPinching(lm)){ // RITA endast vid pinch
-      if(!lastAir){ lastAir = p; return; }
+    // Rita markörer
+    if(pinch){
+      // mittpunkt grön
+      const mid = { x: (tipIndex.x + tipThumb.x)/2, y: (tipIndex.y + tipThumb.y)/2 };
+      drawMarker(mid, "#22c55e"); // grön
+    } else {
+      drawMarker(tipIndex, "#3b82f6"); // blå
+      drawMarker(tipThumb, "#3b82f6");
+    }
+
+    // Rita om airDrawOn + pinch
+    if(airDrawOn && pinch){
+      ctx.strokeStyle = colorInp.value;
+      ctx.lineWidth = +sizeInp.value;
+      if(!lastAir){ lastAir = tipIndex; return; }
       ctx.beginPath();
       ctx.moveTo(lastAir.x, lastAir.y);
-      ctx.lineTo(p.x, p.y);
+      ctx.lineTo(tipIndex.x, tipIndex.y);
       ctx.stroke();
-      lastAir = p;
+      lastAir = tipIndex;
     } else {
-      lastAir = null; // “lyft penna”
+      lastAir = null;
     }
   });
 
   startBtn.onclick = async ()=>{
     try {
       statusEl.textContent = 'Startar kamera...';
-      cam = new Camera(video, {
-        onFrame: async () => { await hands.send({image: video}); },
+      const cam = new Camera(video, {
+        onFrame: async () => { 
+          ctx.clearRect(0,0,canvas.width,canvas.height); // rensa varje frame så markörer inte lämnar spår
+          await hands.send({image: video});
+        },
         width: 640, height: 480
       });
       await cam.start();
@@ -196,7 +189,6 @@
     airBtn.classList.toggle('on', airDrawOn);
     if(!airDrawOn) lastAir = null;
   };
-  // visa som aktiv vid start
   airBtn.classList.add('on');
 </script>
 </body>
