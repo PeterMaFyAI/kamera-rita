@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Kamera + Rita (touch/mus + air-draw)</title>
+  <title>Kamera + Air-draw (pinch för att rita)</title>
   <style>
     :root { --bg:#0b1020; --fg:#eef2ff; --accent:#7c9cff; }
     body { margin:0; font-family:system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
@@ -25,6 +25,8 @@
       touch-action:none;
     }
     video, canvas { display:block; width:100%; height:auto; }
+    /* SPEGLA bara videon – inte canvas-elementet */
+    video { transform: scaleX(-1); transform-origin:center; filter:saturate(1.05) contrast(1.02); }
     canvas.drawing { position:absolute; inset:0; }
     .hint { opacity:.85; font-size:.9rem; margin-top:8px }
     .mini { font-size:.85rem; opacity:.85 }
@@ -34,7 +36,7 @@
 <div class="wrap">
   <div class="toolbar">
     <button id="startBtn">Starta kamera</button>
-    <button id="airBtn" class="toggle" title="Rita i luften med pekfingret">Air-draw: Av</button>
+    <button id="airBtn" class="toggle">Air-draw: På</button>
     <button id="clearBtn">Rensa</button>
     <label>Färg <input id="color" type="color" value="#ffda36"></label>
     <label>Tjocklek <input id="size" type="range" min="1" max="30" value="6"></label>
@@ -47,12 +49,12 @@
   </div>
 
   <div class="hint">
-    • Touch/mus: rita direkt på videon. • Air-draw: tryck “Starta kamera”, slå på “Air-draw” och peka mot kameran.<br>
-    Tips: ha handen tydligt i bild med god belysning.
+    • <b>Pincha</b> (tumme + pekfinger ihop) för att rita i luften. Släpp pinchen för att pausa.<br>
+    • Belysning hjälper. Kör via <b>HTTPS</b> (GitHub Pages).
   </div>
 </div>
 
-<!-- MediaPipe (äldre stabila JS-API:t) -->
+<!-- MediaPipe Hands (stabila CDN) -->
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.min.js"></script>
@@ -69,9 +71,12 @@
   const sizeInp = document.getElementById('size');
   const statusEl= document.getElementById('status');
 
-  let drawingTouch = false;
-  let lastX=0, lastY=0;
-  let airDrawOn = false;
+  // Vi speglar videon visuellt, så vi behöver spegla X-koordinater i all ritlogik.
+  const MIRROR = true;
+
+  let airDrawOn = true;        // som önskat: Air-draw på som standard
+  let lastAir   = null;        // föregående fingertopp-punkt (canvas-coords)
+  let drawingTouch = false;    // för mus/touch om du vill prova
 
   function fitCanvasToVideo() {
     const rect = video.getBoundingClientRect();
@@ -87,10 +92,13 @@
 
   clearBtn.onclick = ()=> ctx.clearRect(0,0,canvas.width,canvas.height);
 
-  // Touch/mus-ritning
+  // Pek-ritning (frivilligt – fungerar också med speglingen)
   function getPoint(evt){
     const r = canvas.getBoundingClientRect();
-    return { x: evt.clientX - r.left, y: evt.clientY - r.top };
+    const rawX = evt.clientX - r.left;
+    const y = evt.clientY - r.top;
+    const x = MIRROR ? (r.width - rawX) : rawX;  // spegla koordinat så linjen hamnar där fingret syns
+    return { x, y };
   }
   canvas.addEventListener('pointerdown', e=>{
     canvas.setPointerCapture(e.pointerId);
@@ -109,7 +117,7 @@
     canvas.addEventListener(t, e=>{ drawingTouch=false; try{canvas.releasePointerCapture(e.pointerId)}catch{} });
   });
 
-  // Kamera + MediaPipe Hands
+  // MediaPipe Hands
   let cam = null;
   const hands = new Hands({
     locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
@@ -121,27 +129,22 @@
     minTrackingConfidence: 0.6
   });
 
-  // Skala normaliserade handkoordinater (0..1) till canvas
+  // Skala normaliserade coords (0..1) -> canvas, med spegling
   function normToCanvas(x, y){
-    // MediaPipe använder videons råa orientering; vår <video> är fit:contain i stage.
-    // Vi mappar mot canvasens aktuella CSS-storlek.
     const r = canvas.getBoundingClientRect();
-    return { x: x * r.width, y: y * r.height };
+    const xN = MIRROR ? (1 - x) : x;     // spegla x
+    return { x: xN * r.width, y: y * r.height };
   }
 
-  // Enkelt "ritvillkor": rita när pekfinger är uppe och inte "pinchar"
-  function shouldDraw(landmarks){
-    // 8 = index fingertip, 4 = thumb tip
+  // PINCH-logik: rita ENDAST när tumme och pekfingerspets är nära
+  function isPinching(landmarks){
     const i = landmarks[8], t = landmarks[4];
     if(!i || !t) return false;
-    // avstånd i normaliserade coords
     const dx = i.x - t.x, dy = i.y - t.y;
-    const dist = Math.hypot(dx, dy);
-    // rita när INTE pinch (dvs dist större än tröskel)
-    return dist > 0.08; // justerbar tröskel
+    const dist = Math.hypot(dx, dy); // normaliserad distans
+    return dist < 0.05; // tröskel (finjustera vid behov)
   }
 
-  let lastAir = null;
   hands.onResults((res)=>{
     if(!airDrawOn) { lastAir = null; return; }
     if(!res.multiHandLandmarks || res.multiHandLandmarks.length===0){
@@ -155,30 +158,26 @@
     ctx.strokeStyle = colorInp.value;
     ctx.lineWidth = +sizeInp.value;
 
-    if(shouldDraw(lm)){
-      if(!lastAir){ lastAir = p; }
+    if(isPinching(lm)){ // RITA endast vid pinch
+      if(!lastAir){ lastAir = p; return; }
       ctx.beginPath();
       ctx.moveTo(lastAir.x, lastAir.y);
       ctx.lineTo(p.x, p.y);
       ctx.stroke();
       lastAir = p;
     } else {
-      lastAir = null; // uppehåll / “penna lyfts”
+      lastAir = null; // “lyft penna”
     }
   });
 
   startBtn.onclick = async ()=>{
     try {
       statusEl.textContent = 'Startar kamera...';
-      // MediaPipe Camera lösning sköter frames -> hands
       cam = new Camera(video, {
-        onFrame: async () => {
-          await hands.send({image: video});
-        },
+        onFrame: async () => { await hands.send({image: video}); },
         width: 640, height: 480
       });
       await cam.start();
-      // vänta en frame så video har layout
       requestAnimationFrame(()=>{
         fitCanvasToVideo();
         statusEl.textContent = 'Kamera igång';
@@ -197,6 +196,8 @@
     airBtn.classList.toggle('on', airDrawOn);
     if(!airDrawOn) lastAir = null;
   };
+  // visa som aktiv vid start
+  airBtn.classList.add('on');
 </script>
 </body>
 </html>
